@@ -13,6 +13,7 @@ struct Image {
 };
 typedef struct Image Image;
 
+Image newimage(int w, int h);
 Image elbp(Image);
 void tograyscale(Image);
 unsigned char *pixelat(Image, int x, int y);
@@ -49,6 +50,61 @@ main(int argc, char *argv[])
 	return EXIT_SUCCESS;
 }
 
+Image
+elbp(Image img)
+{
+	unsigned int neighbors = 8;
+	unsigned int radius = 1;
+	unsigned int n, i, j;
+	double x, y, tx, ty;
+	int fx, fy, cx, cy;
+	double w1, w2, w3, w4;
+	double t;
+	unsigned char add, *p;
+
+	Image out = newimage(img.w, img.h);
+
+	for(n=0; n<neighbors; ++n) {
+		x = radius * cos(2.0 * M_PI * n / neighbors);
+		y = radius * -sin(2.0 * M_PI * n / neighbors);
+		fx = floor(x);
+		fy = floor(y);
+		cx = ceil(x);
+		cy = ceil(y);
+		ty = y - fy;
+		tx = x - fx;
+		// interp weights
+		w1 = (1.0-tx) * (1.0-ty);
+		w2 =      tx  * (1.0-ty);
+		w3 = (1.0-tx) *      ty;
+		w4 =      tx  *      ty;
+		for(i=radius; i<img.h-radius; ++i) {
+			for(j=radius; j<img.w-radius; ++j) {
+				t = w1 * *pixelat(img, j+fx, i+fy) +
+						w2 * *pixelat(img, j+cx, i+fy) +
+						w3 * *pixelat(img, j+fx, i+cy) +
+						w4 * *pixelat(img, j+cx, i+cy);
+				add = (t > *pixelat(img, j, i)) << n;
+				p = pixelat(out, j-radius, i-radius);
+				// r, g, b
+				p[0] += add;
+				p[1] += add;
+				p[2] += add;
+			}
+		}
+	}
+	return out;
+}
+
+Image
+newimage(int w, int h)
+{
+	Image out;
+	out.w = w;
+	out.h = h;
+	out.data = emalloc(w*h, sizeof(unsigned char)*3);
+}
+
 void
 tograyscale(Image img)
 {
@@ -68,59 +124,6 @@ tograyscale(Image img)
 			p[2] = v;
 		}
 	}
-}
-
-Image
-elbp(Image img)
-{
-	unsigned int neighbors = 8;
-	unsigned int radius = 1;
-	unsigned int n, i, j;
-	float x, y, fx, fy, cx, cy, tx, ty;
-	float w1, w2, w3, w4;
-	float t;
-	unsigned char add, *p;
-
-	Image out;
-	out.w = img.w;
-	out.h = img.h;
-	out.data = emalloc(out.w*out.h, sizeof(unsigned char)*3);
-
-	for(n=0; n<neighbors; ++n) {
-		x =  (float)radius * cos(2.0 * M_PI * (float)n / (float)neighbors);
-		y = -(float)radius * sin(2.0 * M_PI * (float)n / (float)neighbors);
-
-		fx = (int)floor(x);
-		fy = (int)floor(y);
-		cx = (int)ceil(x);
-		cy = (int)ceil(y);
-
-		ty = y - (float)fy;
-		tx = x - (float)fx;
-
-		// interp weights
-		w1 = (1.0-tx) * (1.0-ty);
-		w2 =      tx  * (1.0-ty);
-		w3 = (1.0-tx) *      ty;
-		w4 =      tx  *      ty;
-
-		for(i=radius; i<img.h-radius; ++i) {
-			for(j=radius; j<img.w-radius; ++j) {
-				t = w1 * (float)*pixelat(img, j+fx, i+fy) +
-						w2 * (float)*pixelat(img, j+cx, i+fy) +
-						w3 * (float)*pixelat(img, j+fx, i+cy) +
-						w4 * (float)*pixelat(img, j+cx, i+cy);
-				add = (t > *pixelat(img, j, i)) << n;
-				p = pixelat(out, j-radius, i-radius);
-				// set r, g, b
-				p[0] += add;
-				p[1] += add;
-				p[2] += add;
-			}
-		}
-	}
-
-	return out;
 }
 
 unsigned char *
