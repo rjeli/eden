@@ -1,2 +1,0 @@
-hello, seleção
-4 CPUs detected
