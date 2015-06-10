@@ -198,7 +198,6 @@ trainonfiles(int hist[], int n, char *dir, char *pattern)
 		if(f->fts_info == FTS_DC)
 			fprintf(stderr, "%s: cycle in directory tree", f->fts_path);
 	}
-	printf("i is %d\n", i);
 	if(errno)
 		die("fts_read errno is set");
 	if(fts_close(tree) < 0)

@@ -15,3 +15,6 @@ implement local quantized patterns
 https://jurie.users.greyc.fr/papers/12_bmvc-12_faces.pdf
 
 get better data (zoom into face)
+
+style guide:
+http://www.aiju.de/misc/c-style
