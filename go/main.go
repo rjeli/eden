@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"sync"
 
 	"github.com/harrydb/go/img/grayscale"
 )
@@ -21,7 +22,7 @@ import (
 // |_|_|_|
 // |_|_|_|
 // would be 3
-const HIST_SQRT_NUM_SUBDIV = 4
+const HIST_SQRT_NUM_SUBDIV = 16
 
 var stannis_hist []uint
 
@@ -78,8 +79,9 @@ func main() {
 	}()
 
 	c := 0
+	var wg sync.WaitGroup
 	filepath.Walk("lfw-deepfunneled/", func(path string, f os.FileInfo, err error) error {
-		if !f.IsDir() && c <= 300 {
+		if !f.IsDir() {
 			r, err := os.Open(path)
 			if err != nil {
 				panic(err)
@@ -90,18 +92,23 @@ func main() {
 			if err != nil {
 				panic(err)
 			}
-			gray := grayscale.Convert(src, grayscale.ToGrayLuminance)
-			analysis := AnalyzedPicture{
-				path: path,
-				hist: Histogram(Elbp(gray), HIST_SQRT_NUM_SUBDIV),
-			}
-			analyzedPictures = append(analyzedPictures, analysis)
-			progress <- true
+			wg.Add(1)
+			go func(wg *sync.WaitGroup) {
+				gray := grayscale.Convert(src, grayscale.ToGrayLuminance)
+				analysis := AnalyzedPicture{
+					path: path,
+					hist: Histogram(Elbp(gray), HIST_SQRT_NUM_SUBDIV),
+				}
+				analyzedPictures = append(analyzedPictures, analysis)
+				progress <- true
+				wg.Done()
+			}(&wg)
 			c++
 		}
 		return nil
 	})
 
+	wg.Wait()
 	quit <- true
 
 	sort.Sort(ByStannis(analyzedPictures))
