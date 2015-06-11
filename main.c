@@ -56,21 +56,29 @@ void die(char *fmt, ...);
 int 
 main(int argc, char *argv[]) 
 {
-	long i;
+	long i, j;
  	long sum = 0, tensum = 0;
-	int nfilestrained = 1;
-	int *clusters;
-	double **centroids;
-	double err;
+	int nfilestrained = 100;
+	int **labels;
+	double ***centroidsets;
+	double *errs;
+	double minerr;
+	int minindex;
 	int *hist;
 
 	srand(time(NULL));
  
 	/* 2^24 = 16777216 */
 	hist	= emalloc(16777216, sizeof(int));
-	centroids = emalloc(K, sizeof(double *));
-	for(i=0; i<K; ++i)
-		centroids[i] = emalloc(24, sizeof(double));
+
+	centroidsets = emalloc(10, sizeof(double **));
+	errs = emalloc(10, sizeof(double));
+	labels = emalloc(10, sizeof(int *));
+	for(i=0; i<10; ++i) {
+		centroidsets[i] = emalloc(K, sizeof(double *));
+		for(j=0; j<K; ++j)
+			centroidsets[i][j] = emalloc(24, sizeof(double));
+	}
 
 	trainonfiles(hist, nfilestrained, "./lfw-deepfunneled", "*.jpg");
 
@@ -84,18 +92,69 @@ main(int argc, char *argv[])
 	printf("%ld patterns\n", sum);
 	printf("%ld occur more than 10 times\n", sum);
 
-	clusters = kmeans(hist, 16777216, K, centroids, &err);
+	#pragma omp parallel for
+	for(i=0; i<10; ++i) {
+		labels[i] = kmeans(hist, 16777216, K, centroidsets[i], &errs[i]);
+		printf("finished k-means %ld\n", i);
+		fflush(stdout);
+	}
 
-	printf("solved k means for %d clusters with %f error", K, err);
+	minerr = DBL_MAX;
+	for(i=0; i<10; ++i) {
+		if(errs[i]<minerr) {
+			minerr = errs[i];
+			minindex = i;
+		}
+	}
+
+	printf("best k-means is %d, with error %f\n", minindex, errs[minindex]);
+	
+
+	Image img;
+	int comp;
+	if(!(img.data = stbi_load("stannis.jpg", &img.w, &img.h, &comp, 0)))
+		die("could not load stannis.jpg");
+	if(comp != 3)
+		die("picture has %d components, should be 3", comp);
+
+	tograyscale(img);
+
+	uint32_t *outlqp = lqp(img);
+
+	int x, y;
+	uint32_t p;
+	unsigned char *px;
+	for(y=0; y<img.h; ++y) {
+		for(x=0; x<img.w; ++x) {
+			p = outlqp[y*img.w+x];
+			for(int i=0; i<K; ++i) {
+				if(l2dist(p, centroidsets[minindex][i]) < 0.8) {
+					px = pixelat(img, x, y);
+					px[0] = 255;
+					px[1] = 0;
+					px[2] = 0;
+				}
+			}
+		}
+	}
+
+	if(!stbi_write_png("patterns.png", img.w, img.h, comp, img.data, img.w*3))
+		die("could not write patterns.png");
+
+	free(img.data);
+	free(outlqp);
 
 	free(hist);
-	for(i=0; i<K; ++i) {
-		free(centroids[i]);
-		centroids[i] = NULL;
+	for(i=0; i<10; ++i) {
+		for(j=0; j<K; ++j) {
+			free(centroidsets[i][j]);
+		}
+		free(centroidsets[i]);
+		free(labels[i]);
 	}
-	free(centroids);
-	centroids = NULL;
-	hist = NULL;
+	free(centroidsets);
+	free(errs);
+	free(labels);
 	return EXIT_SUCCESS;
 }
 
@@ -343,7 +402,7 @@ kmeans(int *data, long n, int k, double **centroids, double *err)
 			for(j=0; j<24; ++j)
 				c[i][j] = counts[i] ? c1[i][j] / counts[i] : c1[i][j];
 
-	} while(fabs(newerr-olderr)>0.1);
+	} while(fabs(newerr-olderr)>0.01);
 
 	for(i=0; i<k; ++i)
 		free(c1[i]);
