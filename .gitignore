@@ -1,4 +1,5 @@
 lfw-deepfunneled/
+colorferet/
 # Created by https://www.gitignore.io
 
 ### OSX ###
@@ -36,4 +37,3 @@ Temporary Items
 Session.vim
 .netrwhist
 *~
-
