@@ -24,9 +24,9 @@ do {\
 	p = NULL;\
 } while(0)\
 
-int nfilestrained = 10;
+int nfilestrained = 20;
 int nkmeans = 10;
-int K = 150;
+int K = 30;
 int grid = 10;
 
 struct Image {
@@ -51,8 +51,8 @@ unsigned char *pixelat(Image, int x, int y);
 int entcmp(const FTSENT **, const FTSENT **);
 Pathnode *getfiles(char *dir, char *pattern);
 void freepaths(Pathnode *);
-int *trainonfiles(int n, Pathnode *);
-double kmeans(int *data, long n, int k, double ***centroids);
+uint32_t *trainonfiles(int n, Pathnode *, long *elts);
+double kmeans(uint32_t *data, long n, int k, double ***centroids);
 double l2dist(uint32_t, double *);
 void *emalloc(size_t num, size_t size);
 void die(char *fmt, ...);
@@ -71,43 +71,34 @@ void die(char *fmt, ...);
 int 
 main(void)
 {
-	long i, j;
-	double minerr;
-	int minindex;
-
+	long i;
 	srand(time(NULL));
- 
+
 	double **trialcentroids[nkmeans];
 	double trialerrs[nkmeans];
 
 	Pathnode *files = getfiles("./orl_faces", "*.jpg");
-	int *hist = trainonfiles(nfilestrained, files);
+	long elts;
+	uint32_t *patterns = trainonfiles(nfilestrained, files, &elts);
+	printf("%ld patterns\n", elts);
 
-	long sum = 0;
-	for(i=0; i<16777216; ++i)
-		if(hist[i]) 
-			sum++;
-	printf("%ld patterns\n", sum);
 
 	#pragma omp parallel for
 	for(i=0; i<nkmeans; ++i) {
-		trialerrs[i] = kmeans(hist, 16777216, K, &trialcentroids[i]);
+		trialerrs[i] = kmeans(patterns, elts, K, &trialcentroids[i]);
 		printf("finished k-means %ld\n", i);
 		fflush(stdout);
 	}
 
-	minerr = DBL_MAX;
-	minindex = 0;
+	double err = DBL_MAX;
+	double **centroids;
 	for(i=0; i<nkmeans; ++i) {
-		if(trialerrs[i]<minerr) {
-			minerr = trialerrs[i];
-			minindex = i;
+		if(trialerrs[i]<err) {
+			err = trialerrs[i];
+			centroids = trialcentroids[i];
 		}
 	}
-	double **centroids = trialcentroids[minindex];
-	double err = trialerrs[minindex];
-
-	printf("best k-means is %d, with error %f\n", minindex, err);
+	printf("best k-means has error %f\n", err);
 
 	Image img;
 	int comp;
@@ -124,13 +115,16 @@ main(void)
 	efree(outimg.data);
 
 	printf("building lookup table\n");
-	int *lut = emalloc(16777216, sizeof(int));
-	int mindistindex = 0;
+	int *lut = emalloc(1L<<24, sizeof(int));
 	uint32_t ii;
-	for(ii=0; ii<16777216; ++ii) {
-		minerr = DBL_MAX;
+	#pragma omp parallel for
+	for(ii=0; ii<(1L<<24); ++ii) {
+		double minerr = DBL_MAX;
+		int mindistindex = 0;
+		double d;
+		int j;
 		for(j=0; j<K; ++j) {
-			double d = l2dist(ii, centroids[j]);
+			d = l2dist(ii, centroids[j]);
 			if(d<minerr) {
 				minerr = d;
 				mindistindex = j;
@@ -139,6 +133,7 @@ main(void)
 		lut[ii] = mindistindex;
 	}
 
+	printf("generating image\n");
 	int x, y;
 	uint32_t p;
 	for(y=0; y<img.h; ++y) {
@@ -147,15 +142,12 @@ main(void)
 			*pixelat(img, x, y) = lut[p] * 255.0 / K;
 		}
 	}
-
 	if(!stbi_write_png("patterns.png", img.w, img.h, comp, img.data, img.w))
 		die("could not write patterns.png");
 
 	efree(img.data);
 	efree(outlqp);
-	free(lut);
-
-	efree(hist);
+	efree(lut);
 	return EXIT_SUCCESS;
 }
 
@@ -266,11 +258,10 @@ entcmp(const FTSENT **a, const FTSENT **b)
 	return strcmp((*a)->fts_name, (*b)->fts_name);
 }
 
-int *
-trainonfiles(int n, Pathnode *pn)
+uint32_t *
+trainonfiles(int n, Pathnode *pn, long *elts)
 {
-	/* 2^24 = 16777216 */
-	int *hist	= emalloc(16777216, sizeof(int));
+	int *hist	= emalloc(1L<<24, sizeof(int));
 
 	int i, j;
 	int comp;
@@ -296,7 +287,24 @@ trainonfiles(int n, Pathnode *pn)
 		pn = pn->next;
 	}
 
-	return hist;
+	size_t size = 128;
+	long ii;
+	*elts = 0;
+	uint32_t *arr = emalloc(sizeof(int), size);
+
+	for(ii=0; ii<(1L<<24); ++ii) {
+		if(hist[ii]) {
+			if(*elts>=size) {
+				size *= 2;
+				arr = realloc(arr, size);
+			}
+			arr[*elts] = ii;
+			(*elts)++;
+		}
+	}
+
+	free(hist);
+	return arr;
 }
 
 double
@@ -371,7 +379,7 @@ freepaths(Pathnode *p)
 }
 
 double
-kmeans(int *data, long n, int k, double ***centroids)
+kmeans(uint32_t *data, long n, int k, double ***centroids)
 {
 	int *labels = emalloc(n, sizeof(int));
 	long h, i, j;
@@ -383,7 +391,6 @@ kmeans(int *data, long n, int k, double ***centroids)
 	double **c = *centroids;
 	double **c1;
 
-	/* initialize */
 	c1 = emalloc(k, sizeof(double *));
 	for(i=0; i<k; ++i) {
 		c[i] = emalloc(24, sizeof(double));
@@ -391,7 +398,6 @@ kmeans(int *data, long n, int k, double ***centroids)
 		for(j=0; j<24; ++j)
 			c[i][j] = drand();
 	}
-
 
 	do {
 		olderr = err, err = 0;
@@ -401,22 +407,20 @@ kmeans(int *data, long n, int k, double ***centroids)
 
 		/* for each datapoint, */
 		for(h=0; h<n; ++h) {
-			if(data[h]) {
-				/* identify closest cluster */
-				mindist = DBL_MAX;
-				for(i=0; i<k; ++i) {
-					dist = l2dist(h, c[i]);
-					if(dist<mindist) {
-						labels[h] = i;
-						mindist = dist;
-					}
+			/* identify closest cluster */
+			mindist = DBL_MAX;
+			for(i=0; i<k; ++i) {
+				dist = l2dist(data[h], c[i]);
+				if(dist<mindist) {
+					labels[h] = i;
+					mindist = dist;
 				}
-				/* update size and temp centroid of dest cluster */
-				for(j=0; j<24; ++j)
-					c1[labels[h]][j] += h>>j&1;
-				counts[labels[h]]++;
-				err += mindist;
 			}
+			/* update size and temp centroid of dest cluster */
+			for(j=0; j<24; ++j)
+				c1[labels[h]][j] += data[h]>>j&1;
+			counts[labels[h]]++;
+			err += mindist;
 		}
 
 		/* update all centroids */
@@ -424,7 +428,7 @@ kmeans(int *data, long n, int k, double ***centroids)
 			for(j=0; j<24; ++j)
 				c[i][j] = counts[i] ? c1[i][j] / counts[i] : c1[i][j];
 
-	} while(fabs(err-olderr)>0.01);
+	} while(fabs(err-olderr)>0.001);
 
 	for(i=0; i<k; ++i)
 		efree(c1[i]);
