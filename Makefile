@@ -1,7 +1,7 @@
 INCS = -I. -I/include
 LIBS = 
 
-CFLAGS += -g -fopenmp -std=c99 -pedantic -Wall -Os ${INC}
+CFLAGS += -g -fopenmp -std=c99 -pedantic -Wall -O3 ${INC}
 LDFLAGS += -g -fopenmp ${LIBS}
 
 CC = gcc-4.9 

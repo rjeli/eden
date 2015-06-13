@@ -24,10 +24,9 @@ do {\
 	p = NULL;\
 } while(0)\
 
-int nfilestrained = 10;
+int nfilestrained = 100;
 int nkmeans = 10;
 int K = 150;
-int grid = 10;
 
 typedef struct Image {
 	unsigned char *data;
@@ -43,10 +42,13 @@ typedef struct Pathnode {
 	char path[80];
 	char name[80];
 	Pattern pattern;
+	double *hist;
+	int histlen;
 	struct Pathnode *next;
 } Pathnode;
 
 Pattern lqp(Image);
+double *patternhistogram(Pattern, int *lut, int k, int *len);
 void printbinary(int, void *);
 Image lqptoimage(Pattern);
 uint32_t *histtoarr(int *hist, long *elts);
@@ -55,10 +57,11 @@ unsigned char *pixelat(Image, int x, int y);
 int entcmp(const FTSENT **, const FTSENT **);
 Pathnode *getfiles(char *dir, char *pattern);
 void freepaths(Pathnode *);
-uint32_t *trainonfiles(int n, Pathnode *, long *elts);
+uint32_t *getpatterns(int n, Pathnode *, long *elts);
 double kmeans(uint32_t *data, long n, int k, double ***centroids);
 void freecentroids(double ***centroids, long n, int k);
 double l2dist(uint32_t, double *);
+double cosdist(double *, double *, int len);
 void *emalloc(size_t num, size_t size);
 void die(char *fmt, ...);
 
@@ -91,14 +94,14 @@ main(void)
 
 	/* build an array of all patterns */
 	long elts;
-	uint32_t *patterns = trainonfiles(nfilestrained, files, &elts);
-	printf("%ld patterns\n", elts);
+	uint32_t *patterns = getpatterns(nfilestrained, files, &elts);
+	fprintf(stderr, "%ld patterns\n", elts);
 
 	/* find k-means clusters */
 	#pragma omp parallel for
 	for(i=0; i<nkmeans; ++i) {
 		trialerrs[i] = kmeans(patterns, elts, K, &trialcentroids[i]);
-		printf("finished k-means %ld\n", i);
+		fprintf(stderr, "finished k-means %ld\n", i);
 		fflush(stdout);
 	}
 
@@ -111,7 +114,7 @@ main(void)
 
 	err = trialerrs[min];
 	centroids = trialcentroids[min];
-	printf("best k-means has error %f\n", err);
+	fprintf(stderr, "best k-means has error %f\n", err);
 
 	/* load the test image */
 	Image img;
@@ -120,13 +123,9 @@ main(void)
 		die("could not load 1.jpg");
 	if(comp != 1)
 		die("picture has %d components, should be 1", comp);
-
 	Pattern outlqp = lqp(img);
-	Image outimg = lqptoimage(outlqp);
-	if(!stbi_write_png("1lqp.png", img.w, img.h, comp, outimg.data, img.w))
-		die("could not write patterns.png");
 
-	printf("building lookup table\n");
+	fprintf(stderr, "building lookup table\n");
 	int *lut = emalloc(1L<<24, sizeof(*lut));
 	uint32_t ii;
 	#pragma omp parallel for
@@ -145,28 +144,89 @@ main(void)
 		lut[ii] = mindistindex;
 	}
 
-	printf("generating image\n");
-	int x, y;
-	uint32_t p;
-	for(y=0; y<img.h; ++y) {
-		for(x=0; x<img.w; ++x) {
-			p = outlqp.data[y*img.w+x];
-			*pixelat(img, x, y) = lut[p] * 255.0 / K;
-		}
+	/* get histogram for test file */
+	int len;
+	double *h = patternhistogram(outlqp, lut, K, &len);
+
+	fprintf(stderr, "creating image histograms\n");
+	/* note that here, we are reusing the training set. in the future, we won't */
+	Pathnode *pn = files;
+	while(pn) {
+		pn->hist = patternhistogram(pn->pattern, lut, K, &pn->histlen);
+		if(pn->histlen == len)
+			printf("%f %s\n", cosdist(pn->hist, h, len), pn->path);
+		else
+			fprintf(stderr, "histogram lengths do not match");
+		pn = pn->next;
 	}
-	if(!stbi_write_png("patterns.png", img.w, img.h, comp, img.data, img.w))
-		die("could not write patterns.png");
 
 	freepaths(files);
 	freecentroids(trialcentroids, nkmeans, K);
 
+	efree(h);
 	efree(patterns);
-	efree(outimg.data);
 	efree(outlqp.data);
 	efree(img.data);
 	efree(lut);
 
 	return EXIT_SUCCESS;
+}
+
+double 
+cosdist(double *a, double *b, int len)
+{
+	double dot = 0.0;
+	double asum = 0.0, bsum = 0.0;
+	int i;
+	for(i=0; i<len; ++i) {
+		dot += a[i] * b[i];
+		asum += pow(a[i], 2);
+		bsum += pow(b[i], 2);
+	}
+	return dot / sqrt(asum) / sqrt(bsum);
+}
+
+double *
+patternhistogram(Pattern pattern, int *lut, int k, int *len)
+{
+	int w = pattern.w / 10;
+	int h = pattern.h / 10;
+	int i, j, x, y;
+	int index, code;
+	int *hist = emalloc(w*h*k, sizeof(*hist));
+	double *normalized = emalloc(w*h*k, sizeof(*normalized));
+	int sum;
+
+	/* for every block, */
+	for(i=0; i<h; ++i) {
+		for(j=0; j<w; ++j) {
+
+			/* for every pixel in that block, */
+			for(y=0; y<10; ++y) {
+				for(x=0; x<10; ++x) {
+					int patternx = j*10+x;
+					int patterny = i*10+y;
+					code = lut[pattern.data[patternx*pattern.w+patterny]];
+					hist[k*(i*w+j) + code] += 1;
+				}
+			}
+
+		}
+	}
+
+	for(i=0; i<h; ++i) {
+		for(j=0; j<w; ++j) {
+			sum = 0;
+			index = k*(i*w+j);
+			for(code=0; code<k; ++code)
+				sum += hist[index+code];
+			for(code=0; code<k; ++code)
+				normalized[index+code] = (double)hist[index+code] / (double)sum;
+		}
+	}
+
+	*len = k*w*h;
+	return normalized;
 }
 
 void 
@@ -280,28 +340,17 @@ entcmp(const FTSENT **a, const FTSENT **b)
 }
 
 uint32_t *
-trainonfiles(int n, Pathnode *pn, long *elts)
+getpatterns(int n, Pathnode *pn, long *elts)
 {
 	int *hist	= emalloc(1L<<24, sizeof(*hist));
 
 	int i, j;
-	int comp;
-	Image img;
 
 	int processed = 0;
 	while(pn && processed < n) {
-		if(!pn->pattern.data) {
-			if(!(img.data = stbi_load(pn->path, &img.w, &img.h, &comp, 0)))
-				die("could not load %s", pn->path);
-			if(comp != 1)
-				die("picture has %d components, should be 1", comp);
-			pn->pattern = lqp(img);
-			efree(img.data);
-		}
-
-		for(i=0; i<img.h; ++i)
-			for(j=0; j<img.w; ++j)
-				hist[pn->pattern.data[i*img.w+j]]++;
+		for(i=0; i<pn->pattern.h; ++i)
+			for(j=0; j<pn->pattern.w; ++j)
+				hist[pn->pattern.data[i * pn->pattern.w+j]]++;
 
 		processed++;
 		pn = pn->next;
@@ -359,6 +408,9 @@ getfiles(char *dir, char *pattern)
 	Pathnode *head = NULL;
 	Pathnode *curr = NULL;
 
+	Image img;
+	int comp;
+
 	tree = fts_open(argv, FTS_LOGICAL | FTS_NOSTAT, entcmp);
 	if(!tree)
 		die("fts_open failed");
@@ -378,7 +430,14 @@ getfiles(char *dir, char *pattern)
 			curr = emalloc(1, sizeof(*curr));
 			strlcpy(curr->path, f->fts_path, sizeof(curr->path));
 			strlcpy(curr->name, f->fts_name, sizeof(curr->name));
-			curr->pattern.data = NULL;
+
+			if(!(img.data = stbi_load(f->fts_path, &img.w, &img.h, &comp, 0)))
+				die("could not load %s", f->fts_path);
+			if(comp != 1)
+				die("picture has %d components, should be 1", comp);
+			curr->pattern = lqp(img);
+			efree(img.data);
+
 			curr->next = head;
 			head = curr;
 		}
@@ -400,6 +459,8 @@ freepaths(Pathnode *p)
 		p = p->next;
 		if(q->pattern.data)
 			efree(q->pattern.data);
+		if(q->hist)
+			efree(q->hist);
 		efree(q);
 	}
 }
