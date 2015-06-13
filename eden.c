@@ -24,28 +24,32 @@ do {\
 	p = NULL;\
 } while(0)\
 
-int nfilestrained = 20;
+int nfilestrained = 10;
 int nkmeans = 10;
-int K = 30;
+int K = 150;
 int grid = 10;
 
-struct Image {
+typedef struct Image {
 	unsigned char *data;
 	int w, h;
-};
-typedef struct Image Image;
+} Image;
 
-struct Pathnode {
+typedef struct Pattern {
+	uint32_t *data;
+	int w, h;
+} Pattern;
+
+typedef struct Pathnode {
 	char path[80];
 	char name[80];
-	uint32_t *lqp;
+	Pattern pattern;
 	struct Pathnode *next;
-};
-typedef struct Pathnode Pathnode;
+} Pathnode;
 
-uint32_t *lqp(Image);
+Pattern lqp(Image);
 void printbinary(int, void *);
-Image lqptoimage(uint32_t *, int w, int h);
+Image lqptoimage(Pattern);
+uint32_t *histtoarr(int *hist, long *elts);
 void tograyscale(Image);
 unsigned char *pixelat(Image, int x, int y);
 int entcmp(const FTSENT **, const FTSENT **);
@@ -53,6 +57,7 @@ Pathnode *getfiles(char *dir, char *pattern);
 void freepaths(Pathnode *);
 uint32_t *trainonfiles(int n, Pathnode *, long *elts);
 double kmeans(uint32_t *data, long n, int k, double ***centroids);
+void freecentroids(double ***centroids, long n, int k);
 double l2dist(uint32_t, double *);
 void *emalloc(size_t num, size_t size);
 void die(char *fmt, ...);
@@ -72,17 +77,24 @@ int
 main(void)
 {
 	long i;
-	srand(time(NULL));
 
 	double **trialcentroids[nkmeans];
 	double trialerrs[nkmeans];
 
+	double err = DBL_MAX;
+	double **centroids;
+	int min;
+
+	srand(time(NULL));
+
 	Pathnode *files = getfiles("./orl_faces", "*.jpg");
+
+	/* build an array of all patterns */
 	long elts;
 	uint32_t *patterns = trainonfiles(nfilestrained, files, &elts);
 	printf("%ld patterns\n", elts);
 
-
+	/* find k-means clusters */
 	#pragma omp parallel for
 	for(i=0; i<nkmeans; ++i) {
 		trialerrs[i] = kmeans(patterns, elts, K, &trialcentroids[i]);
@@ -90,16 +102,18 @@ main(void)
 		fflush(stdout);
 	}
 
-	double err = DBL_MAX;
-	double **centroids;
-	for(i=0; i<nkmeans; ++i) {
-		if(trialerrs[i]<err) {
-			err = trialerrs[i];
-			centroids = trialcentroids[i];
-		}
-	}
+	/* find the most accurate k-means clusters */
+	err = DBL_MAX;
+	min = 0;
+	for(i=0; i<nkmeans; ++i)
+		if(trialerrs[i]<trialerrs[min])
+			min = i;
+
+	err = trialerrs[min];
+	centroids = trialcentroids[min];
 	printf("best k-means has error %f\n", err);
 
+	/* load the test image */
 	Image img;
 	int comp;
 	if(!(img.data = stbi_load("1.jpg", &img.w, &img.h, &comp, 0)))
@@ -107,15 +121,13 @@ main(void)
 	if(comp != 1)
 		die("picture has %d components, should be 1", comp);
 
-	uint32_t *outlqp = lqp(img);
-
-	Image outimg = lqptoimage(outlqp, img.w, img.h);
+	Pattern outlqp = lqp(img);
+	Image outimg = lqptoimage(outlqp);
 	if(!stbi_write_png("1lqp.png", img.w, img.h, comp, outimg.data, img.w))
 		die("could not write patterns.png");
-	efree(outimg.data);
 
 	printf("building lookup table\n");
-	int *lut = emalloc(1L<<24, sizeof(int));
+	int *lut = emalloc(1L<<24, sizeof(*lut));
 	uint32_t ii;
 	#pragma omp parallel for
 	for(ii=0; ii<(1L<<24); ++ii) {
@@ -138,16 +150,22 @@ main(void)
 	uint32_t p;
 	for(y=0; y<img.h; ++y) {
 		for(x=0; x<img.w; ++x) {
-			p = outlqp[y*img.w+x];
+			p = outlqp.data[y*img.w+x];
 			*pixelat(img, x, y) = lut[p] * 255.0 / K;
 		}
 	}
 	if(!stbi_write_png("patterns.png", img.w, img.h, comp, img.data, img.w))
 		die("could not write patterns.png");
 
+	freepaths(files);
+	freecentroids(trialcentroids, nkmeans, K);
+
+	efree(patterns);
+	efree(outimg.data);
+	efree(outlqp.data);
 	efree(img.data);
-	efree(outlqp);
 	efree(lut);
+
 	return EXIT_SUCCESS;
 }
 
@@ -161,7 +179,7 @@ printbinary(int s, void* p)
 	puts("");
 }
 
-uint32_t *
+Pattern
 lqp(Image img)
 {
 	unsigned int radius, n;
@@ -172,7 +190,10 @@ lqp(Image img)
 	double t;
 	uint32_t add;
 
-	uint32_t *out = emalloc(img.w*img.h, sizeof(uint32_t));
+	Pattern p;
+	p.w = img.w;
+	p.h = img.h;
+	p.data = emalloc(img.w*img.h, sizeof(*p.data));
 
 	for(radius=1; radius<3; ++radius) {
 		for(n=0; n<radius*8; ++n) {
@@ -196,31 +217,31 @@ lqp(Image img)
 							w3 * *pixelat(img, j+fx, i+cy) +
 							w4 * *pixelat(img, j+cx, i+cy);
 					add = (t > *pixelat(img, j, i)) << ((radius-1)*8 + n);
-					out[(i-radius)*img.w+(j-radius)] += add;
+					p.data[(i-radius)*img.w+(j-radius)] += add;
 				}
 			}
 		}
 	}
-	return out;
+	return p;
 }
 
 Image 
-lqptoimage(uint32_t *data, int w, int h)
+lqptoimage(Pattern p)
 {
 	int i, j;
-	unsigned char *p, v;
+	unsigned char *px, v;
 	Image out;
-	out.w = w;
-	out.h = h;
-	out.data = emalloc(w*h, sizeof(unsigned char)*3);
+	out.w = p.w;
+	out.h = p.h;
+	out.data = emalloc(p.w*p.h*3, sizeof(*out.data));
 
-	for(i=0; i<h; ++i)
-		for(j=0; j<w; ++j){
-			p = pixelat(out, j, i);
-			v = data[i*w+j];
-			p[0] = v;
-			p[1] = v;
-			p[2] = v;
+	for(i=0; i<p.h; ++i)
+		for(j=0; j<p.w; ++j){
+			px = pixelat(out, j, i);
+			v = p.data[i*p.w+j];
+			px[0] = v;
+			px[1] = v;
+			px[2] = v;
 		}
 	return out;
 }
@@ -261,7 +282,7 @@ entcmp(const FTSENT **a, const FTSENT **b)
 uint32_t *
 trainonfiles(int n, Pathnode *pn, long *elts)
 {
-	int *hist	= emalloc(1L<<24, sizeof(int));
+	int *hist	= emalloc(1L<<24, sizeof(*hist));
 
 	int i, j;
 	int comp;
@@ -269,41 +290,46 @@ trainonfiles(int n, Pathnode *pn, long *elts)
 
 	int processed = 0;
 	while(pn && processed < n) {
-		if(!(img.data = stbi_load(pn->path, &img.w, &img.h, &comp, 0)))
-			die("could not load %s", pn->path);
-		if(comp != 1)
-			die("picture has %d components, should be 1", comp);
-
-		if(!pn->lqp)
-			pn->lqp = lqp(img);
+		if(!pn->pattern.data) {
+			if(!(img.data = stbi_load(pn->path, &img.w, &img.h, &comp, 0)))
+				die("could not load %s", pn->path);
+			if(comp != 1)
+				die("picture has %d components, should be 1", comp);
+			pn->pattern = lqp(img);
+			efree(img.data);
+		}
 
 		for(i=0; i<img.h; ++i)
 			for(j=0; j<img.w; ++j)
-				hist[pn->lqp[i*img.w+j]]++;
-
-		efree(img.data);
+				hist[pn->pattern.data[i*img.w+j]]++;
 
 		processed++;
 		pn = pn->next;
 	}
 
+	uint32_t *arr = histtoarr(hist, elts);
+	efree(hist);
+	return arr;
+}
+
+uint32_t *
+histtoarr(int *hist, long *elts)
+{
 	size_t size = 128;
 	long ii;
-	*elts = 0;
-	uint32_t *arr = emalloc(sizeof(int), size);
+	uint32_t *arr = emalloc(size, sizeof(*arr));
 
+	*elts = 0;
 	for(ii=0; ii<(1L<<24); ++ii) {
 		if(hist[ii]) {
 			if(*elts>=size) {
 				size *= 2;
-				arr = realloc(arr, size);
+				arr = realloc(arr, size*sizeof(int));
 			}
 			arr[*elts] = ii;
 			(*elts)++;
 		}
 	}
-
-	free(hist);
 	return arr;
 }
 
@@ -349,10 +375,10 @@ getfiles(char *dir, char *pattern)
 		}
 		/* check if matches pattern. FNM_PERIOD means *.c won't match .invis.c */
 		if(!fnmatch(pattern, f->fts_name, FNM_PERIOD)) {
-			curr = emalloc(1, sizeof(Pathnode));
+			curr = emalloc(1, sizeof(*curr));
 			strlcpy(curr->path, f->fts_path, sizeof(curr->path));
 			strlcpy(curr->name, f->fts_name, sizeof(curr->name));
-			curr->lqp = NULL;
+			curr->pattern.data = NULL;
 			curr->next = head;
 			head = curr;
 		}
@@ -372,8 +398,8 @@ freepaths(Pathnode *p)
 	Pathnode *q;
 	while((q = p)) {
 		p = p->next;
-		if(q->lqp)
-			efree(q->lqp);
+		if(q->pattern.data)
+			efree(q->pattern.data);
 		efree(q);
 	}
 }
@@ -381,20 +407,20 @@ freepaths(Pathnode *p)
 double
 kmeans(uint32_t *data, long n, int k, double ***centroids)
 {
-	int *labels = emalloc(n, sizeof(int));
+	int *labels = emalloc(n, sizeof(*labels));
 	long h, i, j;
-	long *counts = emalloc(k, sizeof(long)); 
+	long *counts = emalloc(k, sizeof(*counts)); 
 	double olderr, err = DBL_MAX;
 	double mindist, dist;
 
-	*centroids = emalloc(k, sizeof(double *));
+	*centroids = emalloc(k, sizeof(**centroids));
 	double **c = *centroids;
 	double **c1;
 
-	c1 = emalloc(k, sizeof(double *));
+	c1 = emalloc(k, sizeof(*c1));
 	for(i=0; i<k; ++i) {
-		c[i] = emalloc(24, sizeof(double));
-		c1[i] = emalloc(24, sizeof(double));
+		c[i] = emalloc(24, sizeof(*c[i]));
+		c1[i] = emalloc(24, sizeof(*c1[i]));
 		for(j=0; j<24; ++j)
 			c[i][j] = drand();
 	}
@@ -434,13 +460,25 @@ kmeans(uint32_t *data, long n, int k, double ***centroids)
 		efree(c1[i]);
 	efree(c1);
 	efree(counts);
+	efree(labels);
 	return err;
+}
+void 
+freecentroids(double ***centroids, long n, int k)
+{
+	long i, j;
+	for(i=0; i<n; ++i) {
+		for(j=0; j<k; ++j)
+			efree(centroids[i][j]);
+		efree(centroids[i]);
+	}
 }
 
 void *
 emalloc(size_t num, size_t size)
 {
 	void *mem;
+
 	mem	= calloc(num, size);
 	if(!mem)
 		die("memory allocation failed");
