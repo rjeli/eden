@@ -1,8 +1,10 @@
-INCS = -I. -I/include
-LIBS = 
+INC = -I. -I./inc 
+LIBS = -lblas 
 
-CFLAGS += -g -fopenmp -std=c99 -pedantic -Wall -O3 ${INC}
-LDFLAGS += -g -fopenmp ${LIBS}
+OPENMP = -fopenmp
+
+CFLAGS += -g ${OPENMP} -std=c99 -pedantic -Wall -O3 ${INC}
+LDFLAGS += -g ${OPENMP} ${LIBS}
 
 CC = gcc-4.9 
 
